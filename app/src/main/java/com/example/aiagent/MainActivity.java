@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -31,14 +32,17 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private TextView status;
     private EditText keyBox;
+    private Button agentBtn;
     private SpeechRecognizer recognizer;
     private TextToSpeech tts;
     private SharedPreferences prefs;
+    private boolean agentOn = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("agent", MODE_PRIVATE);
+        agentOn = prefs.getBoolean("agentOn", false);
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -62,10 +66,14 @@ public class MainActivity extends Activity {
         Button btn = new Button(this);
         btn.setText("Bolna shuru karein");
 
+        agentBtn = new Button(this);
+        updateAgentButton();
+
         layout.addView(keyBox);
         layout.addView(saveBtn);
         layout.addView(status);
         layout.addView(btn);
+        layout.addView(agentBtn);
         setContentView(layout);
 
         tts = new TextToSpeech(this, s -> {
@@ -73,6 +81,12 @@ public class MainActivity extends Activity {
                 tts.setLanguage(new Locale("hi", "IN"));
             }
         });
+
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 2);
+        }
 
         saveBtn.setOnClickListener(v -> {
             String k = keyBox.getText().toString().trim();
@@ -94,15 +108,45 @@ public class MainActivity extends Activity {
                 startListening();
             }
         });
+
+        agentBtn.setOnClickListener(v -> {
+            if (agentOn) {
+                stopService(new Intent(this, AgentService.class));
+                agentOn = false;
+                prefs.edit().putBoolean("agentOn", false).apply();
+                updateAgentButton();
+                status.setText("Agent band ho gaya");
+            } else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 3);
+            } else {
+                startAgent();
+            }
+        });
+    }
+
+    private void updateAgentButton() {
+        agentBtn.setText(agentOn ? "Agent band karein (abhi ON hai)" : "Agent ON karein (background)");
+    }
+
+    private void startAgent() {
+        startForegroundService(new Intent(this, AgentService.class));
+        agentOn = true;
+        prefs.edit().putBoolean("agentOn", true).apply();
+        updateAgentButton();
+        status.setText("Agent ON. Ab app band karke notification dekhein.");
     }
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         super.onRequestPermissionsResult(code, perms, results);
-        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-            startListening();
-        } else {
-            status.setText("Mic ki ijazat nahi mili");
+        boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+        if (code == 1) {
+            if (granted) startListening();
+            else status.setText("Mic ki ijazat nahi mili");
+        } else if (code == 3) {
+            if (granted) startAgent();
+            else status.setText("Mic ki ijazat nahi mili");
         }
     }
 
