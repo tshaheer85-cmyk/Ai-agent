@@ -3,42 +3,67 @@ package com.example.aiagent;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
     private TextView status;
+    private EditText keyBox;
     private SpeechRecognizer recognizer;
     private TextToSpeech tts;
+    private SharedPreferences prefs;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("agent", MODE_PRIVATE);
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setGravity(Gravity.CENTER);
         layout.setPadding(40, 40, 40, 40);
 
+        keyBox = new EditText(this);
+        keyBox.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        keyBox.setHint(prefs.getString("key", "").isEmpty()
+                ? "Gemini API key yahan paste karein" : "Key save hai (badalne ke liye nayi paste karein)");
+
+        Button saveBtn = new Button(this);
+        saveBtn.setText("Key save karein");
+
         status = new TextView(this);
         status.setText("Button dabayein aur boliye");
-        status.setTextSize(22);
+        status.setTextSize(20);
         status.setGravity(Gravity.CENTER);
+        status.setPadding(0, 40, 0, 40);
 
         Button btn = new Button(this);
         btn.setText("Bolna shuru karein");
 
+        layout.addView(keyBox);
+        layout.addView(saveBtn);
         layout.addView(status);
         layout.addView(btn);
         setContentView(layout);
@@ -46,6 +71,18 @@ public class MainActivity extends Activity {
         tts = new TextToSpeech(this, s -> {
             if (s == TextToSpeech.SUCCESS) {
                 tts.setLanguage(new Locale("hi", "IN"));
+            }
+        });
+
+        saveBtn.setOnClickListener(v -> {
+            String k = keyBox.getText().toString().trim();
+            if (k.isEmpty()) {
+                status.setText("Pehle key paste karein");
+            } else {
+                prefs.edit().putString("key", k).apply();
+                keyBox.setText("");
+                keyBox.setHint("Key save hai");
+                status.setText("Key save ho gayi");
             }
         });
 
@@ -88,9 +125,7 @@ public class MainActivity extends Activity {
             public void onResults(Bundle b) {
                 ArrayList<String> r = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 if (r != null && !r.isEmpty()) {
-                    String text = r.get(0);
-                    status.setText("Aapne kaha: " + text);
-                    tts.speak("Aapne kaha " + text, TextToSpeech.QUEUE_FLUSH, null, "id1");
+                    askAI(r.get(0));
                 }
             }
         });
@@ -99,4 +134,64 @@ public class MainActivity extends Activity {
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN");
         recognizer.startListening(i);
     }
+
+    private void askAI(final String question) {
+        final String key = prefs.getString("key", "");
+        if (key.isEmpty()) {
+            status.setText("Pehle upar key paste karke save karein");
+            return;
+        }
+        status.setText("Aapne kaha: " + question + "\n\nSoch raha hoon...");
+        new Thread(() -> {
+            String out;
+            try {
+                URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent");
+                HttpURLConnection c = (HttpURLConnection) url.openConnection();
+                c.setRequestMethod("POST");
+                c.setRequestProperty("Content-Type", "application/json");
+                c.setRequestProperty("x-goog-api-key", key);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(30000);
+                c.setDoOutput(true);
+
+                JSONObject sys = new JSONObject().put("parts", new JSONArray().put(
+                        new JSONObject().put("text",
+                                "Tum ek madadgar voice assistant ho. Jawab Roman Urdu/Hindi mein do, "
+                                + "chhota (2-3 jumle), bina star ya markdown ke.")));
+                JSONObject content = new JSONObject().put("parts", new JSONArray().put(
+                        new JSONObject().put("text", question)));
+                JSONObject body = new JSONObject()
+                        .put("system_instruction", sys)
+                        .put("contents", new JSONArray().put(content));
+
+                c.getOutputStream().write(body.toString().getBytes("UTF-8"));
+
+                int code = c.getResponseCode();
+                InputStream is = code < 400 ? c.getInputStream() : c.getErrorStream();
+                BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+
+                if (code >= 400) {
+                    String s = sb.toString();
+                    out = "Error " + code + ": " + s.substring(0, Math.min(250, s.length()));
+                } else {
+                    JSONObject j = new JSONObject(sb.toString());
+                    out = j.getJSONArray("candidates").getJSONObject(0)
+                            .getJSONObject("content").getJSONArray("parts")
+                            .getJSONObject(0).getString("text");
                 }
+            } catch (Exception e) {
+                out = "Masla: " + e.toString();
+            }
+            final String answer = out;
+            runOnUiThread(() -> {
+                status.setText("Aapne kaha: " + question + "\n\nAI: " + answer);
+                if (!answer.startsWith("Error") && !answer.startsWith("Masla")) {
+                    tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "id2");
+                }
+            });
+        }).start();
+    }
+}
