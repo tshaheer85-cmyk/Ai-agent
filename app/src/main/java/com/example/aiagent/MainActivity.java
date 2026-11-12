@@ -16,13 +16,13 @@ import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -32,16 +32,18 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private TextView status;
     private EditText keyBox;
+    private EditText inputBox;
     private Button agentBtn;
     private SpeechRecognizer recognizer;
     private TextToSpeech tts;
     private SharedPreferences prefs;
     private boolean agentOn = false;
+    private int utterId = 0;
 
     private static final String[] MODELS = {
-            "gemini-flash-latest",
+            "gemini-2.5-flash-lite",
             "gemini-flash-lite-latest",
-            "gemini-2.5-flash-lite"
+            "gemini-flash-latest"
     };
 
     @Override
@@ -52,8 +54,7 @@ public class MainActivity extends Activity {
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setGravity(Gravity.CENTER);
-        layout.setPadding(40, 40, 40, 40);
+        layout.setPadding(30, 30, 30, 30);
 
         keyBox = new EditText(this);
         keyBox.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -64,21 +65,31 @@ public class MainActivity extends Activity {
         saveBtn.setText("Key save karein");
 
         status = new TextView(this);
-        status.setText("Button dabayein aur boliye");
-        status.setTextSize(20);
-        status.setGravity(Gravity.CENTER);
-        status.setPadding(0, 40, 0, 40);
+        status.setText("Likhein ya bolein");
+        status.setTextSize(19);
+        status.setPadding(10, 20, 10, 20);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(status);
 
-        Button btn = new Button(this);
-        btn.setText("Bolna shuru karein");
+        inputBox = new EditText(this);
+        inputBox.setHint("Yahan likhein...");
+
+        Button sendBtn = new Button(this);
+        sendBtn.setText("Bhejein");
+
+        Button micBtn = new Button(this);
+        micBtn.setText("Bolna shuru karein");
 
         agentBtn = new Button(this);
         updateAgentButton();
 
         layout.addView(keyBox);
         layout.addView(saveBtn);
-        layout.addView(status);
-        layout.addView(btn);
+        layout.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        layout.addView(inputBox);
+        layout.addView(sendBtn);
+        layout.addView(micBtn);
         layout.addView(agentBtn);
         setContentView(layout);
 
@@ -106,7 +117,17 @@ public class MainActivity extends Activity {
             }
         });
 
-        btn.setOnClickListener(v -> {
+        sendBtn.setOnClickListener(v -> {
+            String q = inputBox.getText().toString().trim();
+            if (q.isEmpty()) {
+                status.setText("Pehle kuch likhein");
+            } else {
+                inputBox.setText("");
+                askAI(q);
+            }
+        });
+
+        micBtn.setOnClickListener(v -> {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
@@ -185,21 +206,42 @@ public class MainActivity extends Activity {
         recognizer.startListening(i);
     }
 
-    private String callGemini(String model, String key, String question) throws Exception {
+    private void speakNow(String text) {
+        String t = text.trim();
+        if (t.isEmpty()) return;
+        utterId++;
+        tts.speak(t, TextToSpeech.QUEUE_ADD, null, "u" + utterId);
+    }
+
+    private void speakFinishedSentences(StringBuilder pending) {
+        int last = -1;
+        String s = pending.toString();
+        String marks = ".?!\n\u0964";
+        for (int i = 0; i < s.length(); i++) {
+            if (marks.indexOf(s.charAt(i)) >= 0) last = i;
+        }
+        if (last >= 0) {
+            speakNow(s.substring(0, last + 1));
+            pending.delete(0, last + 1);
+        }
+    }
+
+    private void streamGemini(String model, String key, final String question,
+                              final StringBuilder full, final StringBuilder pending) throws Exception {
         URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/"
-                + model + ":generateContent");
+                + model + ":streamGenerateContent?alt=sse");
         HttpURLConnection c = (HttpURLConnection) url.openConnection();
         c.setRequestMethod("POST");
         c.setRequestProperty("Content-Type", "application/json");
         c.setRequestProperty("x-goog-api-key", key);
         c.setConnectTimeout(10000);
-        c.setReadTimeout(20000);
+        c.setReadTimeout(25000);
         c.setDoOutput(true);
 
         JSONObject sys = new JSONObject().put("parts", new JSONArray().put(
                 new JSONObject().put("text",
                         "Tum ek madadgar voice assistant ho. Jawab Roman Urdu/Hindi mein do, "
-                        + "chhota (2-3 jumle), bina star ya markdown ke.")));
+                        + "chhota (2-3 jumle), seedha jawab se shuru karo, bina star ya markdown ke.")));
         JSONObject content = new JSONObject().put("parts", new JSONArray().put(
                 new JSONObject().put("text", question)));
         JSONObject body = new JSONObject()
@@ -212,16 +254,33 @@ public class MainActivity extends Activity {
         if (code >= 400) {
             throw new Exception("HTTP " + code);
         }
-        InputStream is = c.getInputStream();
-        BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-        StringBuilder sb = new StringBuilder();
+        BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
         String line;
-        while ((line = br.readLine()) != null) sb.append(line);
-
-        JSONObject j = new JSONObject(sb.toString());
-        return j.getJSONArray("candidates").getJSONObject(0)
-                .getJSONObject("content").getJSONArray("parts")
-                .getJSONObject(0).getString("text");
+        while ((line = br.readLine()) != null) {
+            if (!line.startsWith("data:")) continue;
+            String json = line.substring(5).trim();
+            if (json.isEmpty()) continue;
+            try {
+                JSONObject j = new JSONObject(json);
+                JSONArray cands = j.optJSONArray("candidates");
+                if (cands == null || cands.length() == 0) continue;
+                JSONObject cont = cands.getJSONObject(0).optJSONObject("content");
+                if (cont == null) continue;
+                JSONArray parts = cont.optJSONArray("parts");
+                if (parts == null) continue;
+                for (int p = 0; p < parts.length(); p++) {
+                    String t = parts.getJSONObject(p).optString("text", "");
+                    if (t.isEmpty()) continue;
+                    full.append(t);
+                    pending.append(t);
+                    speakFinishedSentences(pending);
+                    final String snap = full.toString();
+                    runOnUiThread(() -> status.setText(
+                            "Aapne kaha: " + question + "\n\nAI: " + snap));
+                }
+            } catch (Exception ignore) {
+            }
+        }
     }
 
     private void askAI(final String question) {
@@ -230,28 +289,31 @@ public class MainActivity extends Activity {
             status.setText("Pehle upar key paste karke save karein");
             return;
         }
-        status.setText("Aapne kaha: " + question + "\n\nSoch raha hoon...");
+        tts.stop();
+        status.setText("Aapne kaha: " + question + "\n\nAI: ...");
         new Thread(() -> {
-            String out = null;
+            final StringBuilder full = new StringBuilder();
+            final StringBuilder pending = new StringBuilder();
             StringBuilder errs = new StringBuilder();
+            boolean ok = false;
             for (String m : MODELS) {
                 try {
-                    out = callGemini(m, key, question);
+                    streamGemini(m, key, question, full, pending);
+                    ok = true;
                     break;
                 } catch (Exception e) {
                     errs.append(m).append(": ").append(e.getMessage()).append("\n");
+                    if (full.length() > 0) break;
                 }
             }
-            if (out == null) {
-                out = "Error: sab models busy ya fail.\n" + errs;
+            if (pending.length() > 0) {
+                final String rest = pending.toString();
+                runOnUiThread(() -> speakNow(rest));
             }
-            final String answer = out;
-            runOnUiThread(() -> {
-                status.setText("Aapne kaha: " + question + "\n\nAI: " + answer);
-                if (!answer.startsWith("Error")) {
-                    tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "id2");
-                }
-            });
+            if (full.length() == 0) {
+                final String msg = "Error: jawab nahi aaya.\n" + errs;
+                runOnUiThread(() -> status.setText("Aapne kaha: " + question + "\n\nAI: " + msg));
+            }
         }).start();
     }
-                            }
+}
