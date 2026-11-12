@@ -38,6 +38,12 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private boolean agentOn = false;
 
+    private static final String[] MODELS = {
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "gemini-2.5-flash-lite"
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -179,6 +185,45 @@ public class MainActivity extends Activity {
         recognizer.startListening(i);
     }
 
+    private String callGemini(String model, String key, String question) throws Exception {
+        URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/"
+                + model + ":generateContent");
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("POST");
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("x-goog-api-key", key);
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(20000);
+        c.setDoOutput(true);
+
+        JSONObject sys = new JSONObject().put("parts", new JSONArray().put(
+                new JSONObject().put("text",
+                        "Tum ek madadgar voice assistant ho. Jawab Roman Urdu/Hindi mein do, "
+                        + "chhota (2-3 jumle), bina star ya markdown ke.")));
+        JSONObject content = new JSONObject().put("parts", new JSONArray().put(
+                new JSONObject().put("text", question)));
+        JSONObject body = new JSONObject()
+                .put("system_instruction", sys)
+                .put("contents", new JSONArray().put(content));
+
+        c.getOutputStream().write(body.toString().getBytes("UTF-8"));
+
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            throw new Exception("HTTP " + code);
+        }
+        InputStream is = c.getInputStream();
+        BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = br.readLine()) != null) sb.append(line);
+
+        JSONObject j = new JSONObject(sb.toString());
+        return j.getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts")
+                .getJSONObject(0).getString("text");
+    }
+
     private void askAI(final String question) {
         final String key = prefs.getString("key", "");
         if (key.isEmpty()) {
@@ -187,55 +232,26 @@ public class MainActivity extends Activity {
         }
         status.setText("Aapne kaha: " + question + "\n\nSoch raha hoon...");
         new Thread(() -> {
-            String out;
-            try {
-                URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent");
-                HttpURLConnection c = (HttpURLConnection) url.openConnection();
-                c.setRequestMethod("POST");
-                c.setRequestProperty("Content-Type", "application/json");
-                c.setRequestProperty("x-goog-api-key", key);
-                c.setConnectTimeout(15000);
-                c.setReadTimeout(30000);
-                c.setDoOutput(true);
-
-                JSONObject sys = new JSONObject().put("parts", new JSONArray().put(
-                        new JSONObject().put("text",
-                                "Tum ek madadgar voice assistant ho. Jawab Roman Urdu/Hindi mein do, "
-                                + "chhota (2-3 jumle), bina star ya markdown ke.")));
-                JSONObject content = new JSONObject().put("parts", new JSONArray().put(
-                        new JSONObject().put("text", question)));
-                JSONObject body = new JSONObject()
-                        .put("system_instruction", sys)
-                        .put("contents", new JSONArray().put(content));
-
-                c.getOutputStream().write(body.toString().getBytes("UTF-8"));
-
-                int code = c.getResponseCode();
-                InputStream is = code < 400 ? c.getInputStream() : c.getErrorStream();
-                BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-
-                if (code >= 400) {
-                    String s = sb.toString();
-                    out = "Error " + code + ": " + s.substring(0, Math.min(250, s.length()));
-                } else {
-                    JSONObject j = new JSONObject(sb.toString());
-                    out = j.getJSONArray("candidates").getJSONObject(0)
-                            .getJSONObject("content").getJSONArray("parts")
-                            .getJSONObject(0).getString("text");
+            String out = null;
+            StringBuilder errs = new StringBuilder();
+            for (String m : MODELS) {
+                try {
+                    out = callGemini(m, key, question);
+                    break;
+                } catch (Exception e) {
+                    errs.append(m).append(": ").append(e.getMessage()).append("\n");
                 }
-            } catch (Exception e) {
-                out = "Masla: " + e.toString();
+            }
+            if (out == null) {
+                out = "Error: sab models busy ya fail.\n" + errs;
             }
             final String answer = out;
             runOnUiThread(() -> {
                 status.setText("Aapne kaha: " + question + "\n\nAI: " + answer);
-                if (!answer.startsWith("Error") && !answer.startsWith("Masla")) {
+                if (!answer.startsWith("Error")) {
                     tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "id2");
                 }
             });
         }).start();
     }
-}
+                            }
