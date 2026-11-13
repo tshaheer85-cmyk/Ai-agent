@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
@@ -23,10 +24,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
@@ -38,13 +41,22 @@ public class MainActivity extends Activity {
     private TextToSpeech tts;
     private SharedPreferences prefs;
     private boolean agentOn = false;
-    private int utterId = 0;
 
     private static final String[] MODELS = {
             "gemini-2.5-flash-lite",
             "gemini-flash-lite-latest",
             "gemini-flash-latest"
     };
+
+    private static final String SYSTEM_PROMPT =
+            "Tum phone ke voice agent ho. Hamesha SIRF ek JSON object do, aur kuch nahi: "
+            + "{\"action\":\"chat\" ya \"open_app\", "
+            + "\"app\":\"app ka angrezi naam jaise WhatsApp, YouTube, Chrome, Camera, Settings, Gallery "
+            + "(sirf open_app mein, warna khali)\", "
+            + "\"say\":\"chhota jawab Roman Urdu/Hindi mein, 1 se 2 jumle, bina star ya markdown ke\"}. "
+            + "Agar user koi app kholne ko kahe to action open_app. Warna action chat. "
+            + "Tum abhi sirf app khol sakte ho. Message bhejna, call karna, tap ya type karna abhi nahi kar sakte, "
+            + "agar maange to say mein saaf batao ke yeh abhi nahi ho sakta.";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -206,30 +218,9 @@ public class MainActivity extends Activity {
         recognizer.startListening(i);
     }
 
-    private void speakNow(String text) {
-        String t = text.trim();
-        if (t.isEmpty()) return;
-        utterId++;
-        tts.speak(t, TextToSpeech.QUEUE_ADD, null, "u" + utterId);
-    }
-
-    private void speakFinishedSentences(StringBuilder pending) {
-        int last = -1;
-        String s = pending.toString();
-        String marks = ".?!\n\u0964";
-        for (int i = 0; i < s.length(); i++) {
-            if (marks.indexOf(s.charAt(i)) >= 0) last = i;
-        }
-        if (last >= 0) {
-            speakNow(s.substring(0, last + 1));
-            pending.delete(0, last + 1);
-        }
-    }
-
-    private void streamGemini(String model, String key, final String question,
-                              final StringBuilder full, final StringBuilder pending) throws Exception {
+    private String callGemini(String model, String key, String question) throws Exception {
         URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/"
-                + model + ":streamGenerateContent?alt=sse");
+                + model + ":generateContent");
         HttpURLConnection c = (HttpURLConnection) url.openConnection();
         c.setRequestMethod("POST");
         c.setRequestProperty("Content-Type", "application/json");
@@ -239,14 +230,14 @@ public class MainActivity extends Activity {
         c.setDoOutput(true);
 
         JSONObject sys = new JSONObject().put("parts", new JSONArray().put(
-                new JSONObject().put("text",
-                        "Tum ek madadgar voice assistant ho. Jawab Roman Urdu/Hindi mein do, "
-                        + "chhota (2-3 jumle), seedha jawab se shuru karo, bina star ya markdown ke.")));
+                new JSONObject().put("text", SYSTEM_PROMPT)));
         JSONObject content = new JSONObject().put("parts", new JSONArray().put(
                 new JSONObject().put("text", question)));
         JSONObject body = new JSONObject()
                 .put("system_instruction", sys)
-                .put("contents", new JSONArray().put(content));
+                .put("contents", new JSONArray().put(content))
+                .put("generationConfig", new JSONObject()
+                        .put("responseMimeType", "application/json"));
 
         c.getOutputStream().write(body.toString().getBytes("UTF-8"));
 
@@ -254,33 +245,47 @@ public class MainActivity extends Activity {
         if (code >= 400) {
             throw new Exception("HTTP " + code);
         }
-        BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
+        InputStream is = c.getInputStream();
+        BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+        StringBuilder sb = new StringBuilder();
         String line;
-        while ((line = br.readLine()) != null) {
-            if (!line.startsWith("data:")) continue;
-            String json = line.substring(5).trim();
-            if (json.isEmpty()) continue;
-            try {
-                JSONObject j = new JSONObject(json);
-                JSONArray cands = j.optJSONArray("candidates");
-                if (cands == null || cands.length() == 0) continue;
-                JSONObject cont = cands.getJSONObject(0).optJSONObject("content");
-                if (cont == null) continue;
-                JSONArray parts = cont.optJSONArray("parts");
-                if (parts == null) continue;
-                for (int p = 0; p < parts.length(); p++) {
-                    String t = parts.getJSONObject(p).optString("text", "");
-                    if (t.isEmpty()) continue;
-                    full.append(t);
-                    pending.append(t);
-                    speakFinishedSentences(pending);
-                    final String snap = full.toString();
-                    runOnUiThread(() -> status.setText(
-                            "Aapne kaha: " + question + "\n\nAI: " + snap));
-                }
-            } catch (Exception ignore) {
+        while ((line = br.readLine()) != null) sb.append(line);
+
+        JSONObject j = new JSONObject(sb.toString());
+        return j.getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts")
+                .getJSONObject(0).getString("text");
+    }
+
+    private boolean openApp(String name) {
+        if (name == null || name.trim().isEmpty()) return false;
+        String want = name.trim().toLowerCase();
+        PackageManager pm = getPackageManager();
+        Intent main = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
+        String pkg = null;
+        for (ResolveInfo ri : list) {
+            String label = ri.loadLabel(pm).toString().toLowerCase();
+            if (label.equals(want)) {
+                pkg = ri.activityInfo.packageName;
+                break;
             }
         }
+        if (pkg == null) {
+            for (ResolveInfo ri : list) {
+                String label = ri.loadLabel(pm).toString().toLowerCase();
+                if (label.contains(want)) {
+                    pkg = ri.activityInfo.packageName;
+                    break;
+                }
+            }
+        }
+        if (pkg == null) return false;
+        Intent launch = pm.getLaunchIntentForPackage(pkg);
+        if (launch == null) return false;
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(launch);
+        return true;
     }
 
     private void askAI(final String question) {
@@ -290,30 +295,58 @@ public class MainActivity extends Activity {
             return;
         }
         tts.stop();
-        status.setText("Aapne kaha: " + question + "\n\nAI: ...");
+        status.setText("Aapne kaha: " + question + "\n\nSoch raha hoon...");
         new Thread(() -> {
-            final StringBuilder full = new StringBuilder();
-            final StringBuilder pending = new StringBuilder();
+            String raw = null;
             StringBuilder errs = new StringBuilder();
-            boolean ok = false;
             for (String m : MODELS) {
                 try {
-                    streamGemini(m, key, question, full, pending);
-                    ok = true;
+                    raw = callGemini(m, key, question);
                     break;
                 } catch (Exception e) {
                     errs.append(m).append(": ").append(e.getMessage()).append("\n");
-                    if (full.length() > 0) break;
                 }
             }
-            if (pending.length() > 0) {
-                final String rest = pending.toString();
-                runOnUiThread(() -> speakNow(rest));
-            }
-            if (full.length() == 0) {
+            if (raw == null) {
                 final String msg = "Error: jawab nahi aaya.\n" + errs;
-                runOnUiThread(() -> status.setText("Aapne kaha: " + question + "\n\nAI: " + msg));
+                runOnUiThread(() -> status.setText("Aapne kaha: " + question + "\n\n" + msg));
+                return;
             }
+            String action = "chat";
+            String app = "";
+            String say = raw;
+            try {
+                String clean = raw.trim();
+                if (clean.startsWith("```")) {
+                    clean = clean.replace("```json", "").replace("```", "").trim();
+                }
+                JSONObject j = new JSONObject(clean);
+                action = j.optString("action", "chat");
+                app = j.optString("app", "");
+                say = j.optString("say", "");
+            } catch (Exception e) {
+                // JSON nahi bana, jawab jaisa hai waisa dikhayenge
+            }
+            final String fAction = action;
+            final String fApp = app;
+            final String fSay = say;
+            runOnUiThread(() -> {
+                String shown = "Aapne kaha: " + question + "\n\nAI: " + fSay;
+                boolean opened = false;
+                if (fAction.equals("open_app")) {
+                    opened = openApp(fApp);
+                    shown += opened ? "\n\n[App khuli: " + fApp + "]"
+                                    : "\n\n[App nahi mili: " + fApp + "]";
+                }
+                status.setText(shown);
+                String toSpeak = fSay;
+                if (fAction.equals("open_app") && !opened) {
+                    toSpeak = fApp + " app mujhe nahi mili";
+                }
+                if (!toSpeak.isEmpty()) {
+                    tts.speak(toSpeak, TextToSpeech.QUEUE_FLUSH, null, "u1");
+                }
+            });
         }).start();
     }
 }
