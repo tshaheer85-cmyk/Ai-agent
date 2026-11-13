@@ -6,4 +6,4 @@
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
     android:notificationTimeout="100"
-    android:description="AI Agent aapke kehne par apps mein tap aur type karega" />
+    android:description="@string/accessibility_desc" />
