@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
     private JSONObject mem;
     private File memFile;
 
-    private static final int MAX_STEPS = 12;
+    private static final int MAX_STEPS = 50;
 
     private static final String[] MODELS = {
             "gemini-2.5-flash-lite",
